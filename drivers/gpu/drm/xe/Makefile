@@ -152,6 +152,8 @@ endif
 subdir-ccflags-$(CONFIG_DRM_XE_DISPLAY) += \
 	-I$(src)/display/ext \
 	-I$(src)/compat-i915-headers \
+	-I$(srctree)/drivers/gpu/drm/xe/display/ \
+	-Ddrm_i915_gem_object=xe_bo \
 	-Ddrm_i915_private=xe_device
 
 # Rule to build display code shared with i915
@@ -164,10 +166,7 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/ext/i915_irq.o \
 	display/ext/i915_utils.o \
 	display/intel_bo.o \
-	display/intel_fb_bo.o \
 	display/intel_fb.o \
-	display/intel_fbdev_fb.o \
-	display/intel_hdcp_gsc_message.o \
 	display/intel_display_power.o \
 	display/xe_display.o \
 	display/xe_display_misc.o \
@@ -176,10 +175,8 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/xe_fb_pin.o \
 	display/xe_hdcp_gsc.o \
 	display/xe_plane_initial.o \
-	display/xe_dsb_buffer.o \
 	display/xe_tdf.o \
 	display/icl_dsi.o \
-	display/intel_alpm.o \
 	display/intel_atomic.o \
 	display/intel_atomic_plane.o \
 	display/intel_audio.o \
@@ -202,6 +199,7 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_display_driver.o \
 	display/intel_display_irq.o \
 	display/intel_display_params.o \
+	display/intel_display_power.o \
 	display/intel_display_power_map.o \
 	display/intel_display_power_well.o \
 	display/intel_display_trace.o \
@@ -214,7 +212,6 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_dp_hdcp.o \
 	display/intel_dp_link_training.o \
 	display/intel_dp_mst.o \
-	display/intel_dp_test.o \
 	display/intel_dpll.o \
 	display/intel_dpll_mgr.o \
 	display/intel_dpt_common.o \
@@ -223,7 +220,7 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_dsi.o \
 	display/intel_dsi_dcs_backlight.o \
 	display/intel_dsi_vbt.o \
-	display/intel_encoder.o \
+	display/intel_fb.o \
 	display/intel_fbc.o \
 	display/intel_fdi.o \
 	display/intel_fifo_underrun.o \
@@ -231,7 +228,6 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_global_state.o \
 	display/intel_gmbus.o \
 	display/intel_hdcp.o \
-	display/intel_hdcp_gsc_message.o \
 	display/intel_hdmi.o \
 	display/intel_hotplug.o \
 	display/intel_hotplug_irq.o \
@@ -242,7 +238,6 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_modeset_setup.o \
 	display/intel_modeset_verify.o \
 	display/intel_panel.o \
-	display/intel_pfit.o \
 	display/intel_pmdemand.o \
 	display/intel_pps.o \
 	display/intel_psr.o \
@@ -254,12 +249,11 @@ xe-$(CONFIG_DRM_XE_DISPLAY) += \
 	display/intel_vdsc.o \
 	display/intel_vga.o \
 	display/intel_vrr.o \
-	display/intel_dmc_wl.o \
 	display/intel_wm.o \
 	display/skl_scaler.o \
 	display/skl_universal_plane.o \
+	display/intel_link_bw.o \
 	display/skl_watermark.o
-
 
 # SOC code shared with i915
 xe-$(CONFIG_DRM_XE_DISPLAY) += \
@@ -290,7 +284,6 @@ ifeq ($(CONFIG_DEBUG_FS),y)
 
 	xe-$(CONFIG_DRM_XE_DISPLAY) += \
 		display/intel_display_debugfs.o \
-		display/intel_display_debugfs_params.o \
 		display/intel_pipe_crc.o
 endif
 

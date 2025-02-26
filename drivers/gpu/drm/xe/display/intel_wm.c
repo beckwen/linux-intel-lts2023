@@ -3,8 +3,6 @@
  * Copyright © 2023 Intel Corporation
  */
 
-#include <linux/debugfs.h>
-
 #include "i915_drv.h"
 #include "i9xx_wm.h"
 #include "intel_display_types.h"
@@ -50,15 +48,29 @@ void intel_update_watermarks(struct drm_i915_private *i915)
 		i915->display.funcs.wm->update_wm(i915);
 }
 
-int intel_wm_compute(struct intel_atomic_state *state,
-		     struct intel_crtc *crtc)
+int intel_compute_pipe_wm(struct intel_atomic_state *state,
+			  struct intel_crtc *crtc)
 {
-	struct intel_display *display = to_intel_display(state);
+	struct drm_i915_private *i915 = to_i915(state->base.dev);
 
-	if (!display->funcs.wm->compute_watermarks)
+	if (i915->display.funcs.wm->compute_pipe_wm)
+		return i915->display.funcs.wm->compute_pipe_wm(state, crtc);
+
+	return 0;
+}
+
+int intel_compute_intermediate_wm(struct intel_atomic_state *state,
+				  struct intel_crtc *crtc)
+{
+	struct drm_i915_private *i915 = to_i915(state->base.dev);
+
+	if (!i915->display.funcs.wm->compute_intermediate_wm)
 		return 0;
 
-	return display->funcs.wm->compute_watermarks(state, crtc);
+	if (drm_WARN_ON(&i915->drm, !i915->display.funcs.wm->compute_pipe_wm))
+		return 0;
+
+	return i915->display.funcs.wm->compute_intermediate_wm(state, crtc);
 }
 
 bool intel_initial_watermarks(struct intel_atomic_state *state,
@@ -161,8 +173,17 @@ void intel_print_wm_latency(struct drm_i915_private *dev_priv,
 	}
 }
 
+static const struct intel_wm_funcs nop_wm_func = {
+};
+
 void intel_wm_init(struct drm_i915_private *i915)
 {
+	if (IS_SRIOV_VF(i915)) {
+		/* XXX */
+		i915->display.funcs.wm = &nop_wm_func;
+		return;
+	}
+
 	if (DISPLAY_VER(i915) >= 9)
 		skl_wm_init(i915);
 	else
@@ -278,7 +299,7 @@ static ssize_t wm_latency_write(struct file *file, const char __user *ubuf,
 {
 	struct seq_file *m = file->private_data;
 	struct drm_i915_private *dev_priv = m->private;
-	u16 new[8] = {};
+	u16 new[8] = { 0 };
 	int level;
 	int ret;
 	char tmp[32];

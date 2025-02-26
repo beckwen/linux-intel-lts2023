@@ -3,23 +3,30 @@
  * Copyright © 2021 Intel Corporation
  */
 
+#include <drm/drm_blend.h>
+#include <drm/drm_damage_helper.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_modeset_helper.h>
+
 #include <linux/dma-fence.h>
 #include <linux/dma-resv.h>
 
-#include <drm/drm_blend.h>
-#include <drm/drm_gem.h>
-#include <drm/drm_modeset_helper.h>
-#include <drm/drm_plane.h>
-
 #include "i915_drv.h"
-#include "intel_atomic_plane.h"
-#include "intel_bo.h"
 #include "intel_display.h"
 #include "intel_display_types.h"
 #include "intel_dpt.h"
 #include "intel_fb.h"
-#include "intel_fb_bo.h"
 #include "intel_frontbuffer.h"
+
+#ifdef I915
+/*
+ * i915 requires obj->__do_not_access.base,
+ * xe uses obj->ttm.base
+ */
+#define ttm __do_not_access
+#else
+#include <drm/ttm/ttm_bo.h>
+#endif
 
 #define check_array_bounds(i915, a, i) drm_WARN_ON(&(i915)->drm, (i) >= ARRAY_SIZE(a))
 
@@ -46,14 +53,6 @@ static const struct drm_format_info skl_ccs_formats[] = {
 	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, .has_alpha = true, },
 	{ .format = DRM_FORMAT_ABGR8888, .depth = 32, .num_planes = 2,
 	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, .has_alpha = true, },
-	{ .format = DRM_FORMAT_XRGB2101010, .depth = 30, .num_planes = 2,
-	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, },
-	{ .format = DRM_FORMAT_XBGR2101010, .depth = 30, .num_planes = 2,
-	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, },
-	{ .format = DRM_FORMAT_ARGB2101010, .depth = 30, .num_planes = 2,
-	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, .has_alpha = true, },
-	{ .format = DRM_FORMAT_ABGR2101010, .depth = 30, .num_planes = 2,
-	  .cpp = { 4, 1, }, .hsub = 8, .vsub = 16, .has_alpha = true, },
 };
 
 /*
@@ -75,30 +74,6 @@ static const struct drm_format_info gen12_ccs_formats[] = {
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 	{ .format = DRM_FORMAT_ABGR8888, .depth = 32, .num_planes = 2,
 	  .char_per_block = { 4, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 1 }, .block_w = { 1, 1 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 1 }, .block_w = { 1, 1 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 1 }, .block_w = { 1, 1 }, .block_h = { 1, 1 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 1 }, .block_w = { 1, 1 }, .block_h = { 1, 1 },
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 	{ .format = DRM_FORMAT_YUYV, .num_planes = 2,
 	  .char_per_block = { 2, 1 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
@@ -135,79 +110,31 @@ static const struct drm_format_info gen12_ccs_formats[] = {
  */
 static const struct drm_format_info gen12_ccs_cc_formats[] = {
 	{ .format = DRM_FORMAT_XRGB8888, .depth = 24, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
+	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 2 }, .block_h = { 1, 1, 1 },
 	  .hsub = 1, .vsub = 1, },
 	{ .format = DRM_FORMAT_XBGR8888, .depth = 24, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
+	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 2 }, .block_h = { 1, 1, 1 },
 	  .hsub = 1, .vsub = 1, },
 	{ .format = DRM_FORMAT_ARGB8888, .depth = 32, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
+	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 2 }, .block_h = { 1, 1, 1 },
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 	{ .format = DRM_FORMAT_ABGR8888, .depth = 32, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB2101010, .depth = 30, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR2101010, .depth = 30, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB2101010, .depth = 30, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR2101010, .depth = 30, .num_planes = 3,
-	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB16161616F, .depth = 0, .num_planes = 3,
-	  .char_per_block = { 8, 1, 0 }, .block_w = { 1, 1, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR16161616F, .depth = 0, .num_planes = 3,
-	  .char_per_block = { 8, 1, 0 }, .block_w = { 1, 1, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB16161616F, .depth = 0, .num_planes = 3,
-	  .char_per_block = { 8, 1, 0 }, .block_w = { 1, 1, 0 }, .block_h = { 1, 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR16161616F, .depth = 0, .num_planes = 3,
-	  .char_per_block = { 8, 1, 0 }, .block_w = { 1, 1, 0 }, .block_h = { 1, 1, 0 },
+	  .char_per_block = { 4, 1, 0 }, .block_w = { 1, 2, 2 }, .block_h = { 1, 1, 1 },
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 };
 
 static const struct drm_format_info gen12_flat_ccs_cc_formats[] = {
 	{ .format = DRM_FORMAT_XRGB8888, .depth = 24, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
+	  .char_per_block = { 4, 0 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
 	  .hsub = 1, .vsub = 1, },
 	{ .format = DRM_FORMAT_XBGR8888, .depth = 24, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
+	  .char_per_block = { 4, 0 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
 	  .hsub = 1, .vsub = 1, },
 	{ .format = DRM_FORMAT_ARGB8888, .depth = 32, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
+	  .char_per_block = { 4, 0 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 	{ .format = DRM_FORMAT_ABGR8888, .depth = 32, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR2101010, .depth = 30, .num_planes = 2,
-	  .char_per_block = { 4, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_XRGB16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_XBGR16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, },
-	{ .format = DRM_FORMAT_ARGB16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
-	  .hsub = 1, .vsub = 1, .has_alpha = true },
-	{ .format = DRM_FORMAT_ABGR16161616F, .depth = 0, .num_planes = 2,
-	  .char_per_block = { 8, 0 }, .block_w = { 1, 0 }, .block_h = { 1, 0 },
+	  .char_per_block = { 4, 0 }, .block_w = { 1, 2 }, .block_h = { 1, 1 },
 	  .hsub = 1, .vsub = 1, .has_alpha = true },
 };
 
@@ -245,14 +172,6 @@ struct intel_modifier_desc {
 
 static const struct intel_modifier_desc intel_modifiers[] = {
 	{
-		.modifier = I915_FORMAT_MOD_4_TILED_LNL_CCS,
-		.display_ver = { 20, -1 },
-		.plane_caps = INTEL_PLANE_CAP_TILING_4,
-	}, {
-		.modifier = I915_FORMAT_MOD_4_TILED_BMG_CCS,
-		.display_ver = { 14, -1 },
-		.plane_caps = INTEL_PLANE_CAP_TILING_4 | INTEL_PLANE_CAP_NEED64K_PHYS,
-	}, {
 		.modifier = I915_FORMAT_MOD_4_TILED_MTL_MC_CCS,
 		.display_ver = { 14, 14 },
 		.plane_caps = INTEL_PLANE_CAP_TILING_4 | INTEL_PLANE_CAP_CCS_MC,
@@ -350,7 +269,7 @@ static const struct intel_modifier_desc intel_modifiers[] = {
 		.plane_caps = INTEL_PLANE_CAP_TILING_Y,
 	}, {
 		.modifier = I915_FORMAT_MOD_X_TILED,
-		.display_ver = { 0, 29 },
+		.display_ver = DISPLAY_VER_ALL,
 		.plane_caps = INTEL_PLANE_CAP_TILING_X,
 	}, {
 		.modifier = DRM_FORMAT_MOD_LINEAR,
@@ -391,33 +310,6 @@ lookup_format_info(const struct drm_format_info formats[],
 	}
 
 	return NULL;
-}
-
-unsigned int intel_fb_modifier_to_tiling(u64 fb_modifier)
-{
-	const struct intel_modifier_desc *md;
-	u8 tiling_caps;
-
-	md = lookup_modifier_or_null(fb_modifier);
-	if (!md)
-		return I915_TILING_NONE;
-
-	tiling_caps = lookup_modifier_or_null(fb_modifier)->plane_caps &
-			 INTEL_PLANE_CAP_TILING_MASK;
-
-	switch (tiling_caps) {
-	case INTEL_PLANE_CAP_TILING_Y:
-		return I915_TILING_Y;
-	case INTEL_PLANE_CAP_TILING_X:
-		return I915_TILING_X;
-	case INTEL_PLANE_CAP_TILING_4:
-	case INTEL_PLANE_CAP_TILING_Yf:
-	case INTEL_PLANE_CAP_TILING_NONE:
-		return I915_TILING_NONE;
-	default:
-		MISSING_CASE(tiling_caps);
-		return I915_TILING_NONE;
-	}
 }
 
 /**
@@ -502,37 +394,6 @@ bool intel_fb_is_mc_ccs_modifier(u64 modifier)
 				      INTEL_PLANE_CAP_CCS_MC);
 }
 
-/**
- * intel_fb_needs_64k_phys: Check if modifier requires 64k physical placement.
- * @modifier: Modifier to check
- *
- * Returns:
- * Returns %true if @modifier requires 64k aligned physical pages.
- */
-bool intel_fb_needs_64k_phys(u64 modifier)
-{
-	const struct intel_modifier_desc *md = lookup_modifier_or_null(modifier);
-
-	if (!md)
-		return false;
-
-	return plane_caps_contain_any(md->plane_caps,
-				      INTEL_PLANE_CAP_NEED64K_PHYS);
-}
-
-/**
- * intel_fb_is_tile4_modifier: Check if a modifier is a tile4 modifier type
- * @modifier: Modifier to check
- *
- * Returns:
- * Returns %true if @modifier is a tile4 modifier.
- */
-bool intel_fb_is_tile4_modifier(u64 modifier)
-{
-	return plane_caps_contain_any(lookup_modifier(modifier)->plane_caps,
-				      INTEL_PLANE_CAP_TILING_4);
-}
-
 static bool check_modifier_display_ver_range(const struct intel_modifier_desc *md,
 					     u8 display_ver_from, u8 display_ver_until)
 {
@@ -556,14 +417,6 @@ static bool plane_has_modifier(struct drm_i915_private *i915,
 	 */
 	if (intel_fb_is_ccs_modifier(md->modifier) &&
 	    HAS_FLAT_CCS(i915) != !md->ccs.packed_aux_planes)
-		return false;
-
-	if (md->modifier == I915_FORMAT_MOD_4_TILED_BMG_CCS &&
-	    (GRAPHICS_VER(i915) < 20 || !IS_DGFX(i915)))
-		return false;
-
-	if (md->modifier == I915_FORMAT_MOD_4_TILED_LNL_CCS &&
-	    (GRAPHICS_VER(i915) < 20 || IS_DGFX(i915)))
 		return false;
 
 	return true;
@@ -714,6 +567,12 @@ static bool is_gen12_ccs_cc_plane(const struct drm_framebuffer *fb, int color_pl
 	return intel_fb_rc_ccs_cc_plane(fb) == color_plane;
 }
 
+static bool is_semiplanar_uv_plane(const struct drm_framebuffer *fb, int color_plane)
+{
+	return intel_format_info_is_yuv_semiplanar(fb->format, fb->modifier) &&
+		color_plane == 1;
+}
+
 bool is_surface_linear(const struct drm_framebuffer *fb, int color_plane)
 {
 	return fb->modifier == DRM_FORMAT_MOD_LINEAR ||
@@ -782,8 +641,6 @@ intel_tile_width_bytes(const struct drm_framebuffer *fb, int color_plane)
 			return 128;
 		else
 			return 512;
-	case I915_FORMAT_MOD_4_TILED_BMG_CCS:
-	case I915_FORMAT_MOD_4_TILED_LNL_CCS:
 	case I915_FORMAT_MOD_4_TILED_DG2_RC_CCS:
 	case I915_FORMAT_MOD_4_TILED_DG2_RC_CCS_CC:
 	case I915_FORMAT_MOD_4_TILED_DG2_MC_CCS:
@@ -891,6 +748,29 @@ intel_fb_align_height(const struct drm_framebuffer *fb,
 	return ALIGN(height, tile_height);
 }
 
+#ifdef I915
+static unsigned int intel_fb_modifier_to_tiling(u64 fb_modifier)
+{
+	u8 tiling_caps = lookup_modifier(fb_modifier)->plane_caps &
+			 INTEL_PLANE_CAP_TILING_MASK;
+
+	switch (tiling_caps) {
+	case INTEL_PLANE_CAP_TILING_Y:
+		return I915_TILING_Y;
+	case INTEL_PLANE_CAP_TILING_X:
+		return I915_TILING_X;
+	case INTEL_PLANE_CAP_TILING_4:
+	case INTEL_PLANE_CAP_TILING_Yf:
+	case INTEL_PLANE_CAP_TILING_NONE:
+		return I915_TILING_NONE;
+	default:
+		MISSING_CASE(tiling_caps);
+		return I915_TILING_NONE;
+	}
+}
+
+#endif
+
 bool intel_fb_modifier_uses_dpt(struct drm_i915_private *i915, u64 modifier)
 {
 	return HAS_DPT(i915) && modifier != DRM_FORMAT_MOD_LINEAR;
@@ -898,8 +778,92 @@ bool intel_fb_modifier_uses_dpt(struct drm_i915_private *i915, u64 modifier)
 
 bool intel_fb_uses_dpt(const struct drm_framebuffer *fb)
 {
-	return to_i915(fb->dev)->display.params.enable_dpt &&
+	return fb && to_i915(fb->dev)->params.enable_dpt &&
 		intel_fb_modifier_uses_dpt(to_i915(fb->dev), fb->modifier);
+}
+
+unsigned int intel_cursor_alignment(const struct drm_i915_private *i915)
+{
+	if (IS_I830(i915))
+		return 16 * 1024;
+	else if (IS_I85X(i915))
+		return 256;
+	else if (IS_I845G(i915) || IS_I865G(i915))
+		return 32;
+	else
+		return 4 * 1024;
+}
+
+static unsigned int intel_linear_alignment(const struct drm_i915_private *dev_priv)
+{
+	if (DISPLAY_VER(dev_priv) >= 9)
+		return 256 * 1024;
+	else if (IS_I965G(dev_priv) || IS_I965GM(dev_priv) ||
+		 IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv))
+		return 128 * 1024;
+	else if (DISPLAY_VER(dev_priv) >= 4)
+		return 4 * 1024;
+	else
+		return 0;
+}
+
+unsigned int intel_surf_alignment(const struct drm_framebuffer *fb,
+				  int color_plane)
+{
+	struct drm_i915_private *dev_priv = to_i915(fb->dev);
+
+	if (intel_fb_uses_dpt(fb))
+		return 512 * 4096;
+
+	/* AUX_DIST needs only 4K alignment */
+	if (intel_fb_is_ccs_aux_plane(fb, color_plane))
+		return 4096;
+
+	if (is_semiplanar_uv_plane(fb, color_plane)) {
+		/*
+		 * TODO: cross-check wrt. the bspec stride in bytes * 64 bytes
+		 * alignment for linear UV planes on all platforms.
+		 */
+		if (DISPLAY_VER(dev_priv) >= 12) {
+			if (fb->modifier == DRM_FORMAT_MOD_LINEAR)
+				return intel_linear_alignment(dev_priv);
+
+			return intel_tile_row_size(fb, color_plane);
+		}
+
+		return 4096;
+	}
+
+	drm_WARN_ON(&dev_priv->drm, color_plane != 0);
+
+	switch (fb->modifier) {
+	case DRM_FORMAT_MOD_LINEAR:
+		return intel_linear_alignment(dev_priv);
+	case I915_FORMAT_MOD_X_TILED:
+		if (HAS_ASYNC_FLIPS(dev_priv))
+			return 256 * 1024;
+		return 0;
+	case I915_FORMAT_MOD_Y_TILED_GEN12_MC_CCS:
+	case I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS:
+	case I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS_CC:
+	case I915_FORMAT_MOD_4_TILED_MTL_MC_CCS:
+	case I915_FORMAT_MOD_4_TILED_MTL_RC_CCS:
+	case I915_FORMAT_MOD_4_TILED_MTL_RC_CCS_CC:
+		return 16 * 1024;
+	case I915_FORMAT_MOD_Y_TILED_CCS:
+	case I915_FORMAT_MOD_Yf_TILED_CCS:
+	case I915_FORMAT_MOD_Y_TILED:
+	case I915_FORMAT_MOD_4_TILED:
+	case I915_FORMAT_MOD_Yf_TILED:
+		return 1 * 1024 * 1024;
+	case I915_FORMAT_MOD_4_TILED_DG2_RC_CCS:
+	case I915_FORMAT_MOD_4_TILED_DG2_RC_CCS_CC:
+	case I915_FORMAT_MOD_4_TILED_DG2_MC_CCS:
+		return 16 * 1024;
+	default:
+		MISSING_CASE(fb->modifier);
+		return 0;
+	}
 }
 
 void intel_fb_plane_get_subsampling(int *hsub, int *vsub,
@@ -1073,7 +1037,7 @@ static u32 intel_compute_aligned_offset(struct drm_i915_private *i915,
 					int color_plane,
 					unsigned int pitch,
 					unsigned int rotation,
-					unsigned int alignment)
+					u32 alignment)
 {
 	unsigned int cpp = fb->format->cpp[color_plane];
 	u32 offset, offset_aligned;
@@ -1126,12 +1090,17 @@ u32 intel_plane_compute_aligned_offset(int *x, int *y,
 				       const struct intel_plane_state *state,
 				       int color_plane)
 {
-	struct intel_plane *plane = to_intel_plane(state->uapi.plane);
-	struct drm_i915_private *i915 = to_i915(plane->base.dev);
+	struct intel_plane *intel_plane = to_intel_plane(state->uapi.plane);
+	struct drm_i915_private *i915 = to_i915(intel_plane->base.dev);
 	const struct drm_framebuffer *fb = state->hw.fb;
 	unsigned int rotation = state->hw.rotation;
-	unsigned int pitch = state->view.color_plane[color_plane].mapping_stride;
-	unsigned int alignment = plane->min_alignment(plane, fb, color_plane);
+	int pitch = state->view.color_plane[color_plane].mapping_stride;
+	u32 alignment;
+
+	if (intel_plane->id == PLANE_CURSOR)
+		alignment = intel_cursor_alignment(i915);
+	else
+		alignment = intel_surf_alignment(fb, color_plane);
 
 	return intel_compute_aligned_offset(i915, x, y, fb, color_plane,
 					    pitch, rotation, alignment);
@@ -1143,9 +1112,14 @@ static int intel_fb_offset_to_xy(int *x, int *y,
 				 int color_plane)
 {
 	struct drm_i915_private *i915 = to_i915(fb->dev);
-	unsigned int height, alignment, unused;
+	unsigned int height;
+	u32 alignment;
 
-	if (fb->modifier != DRM_FORMAT_MOD_LINEAR)
+	if (DISPLAY_VER(i915) >= 12 &&
+	    !intel_fb_needs_pot_stride_remap(to_intel_framebuffer(fb)) &&
+	    is_semiplanar_uv_plane(fb, color_plane))
+		alignment = intel_tile_row_size(fb, color_plane);
+	else if (fb->modifier != DRM_FORMAT_MOD_LINEAR)
 		alignment = intel_tile_size(i915);
 	else
 		alignment = 0;
@@ -1157,12 +1131,12 @@ static int intel_fb_offset_to_xy(int *x, int *y,
 		return -EINVAL;
 	}
 
-	height = drm_format_info_plane_height(fb->format, fb->height, color_plane);
+	height = drm_framebuffer_plane_height(fb->height, fb, color_plane);
 	height = ALIGN(height, intel_tile_height(fb, color_plane));
 
 	/* Catch potential overflows early */
-	if (check_add_overflow(mul_u32_u32(height, fb->pitches[color_plane]),
-			       fb->offsets[color_plane], &unused)) {
+	if (add_overflows_t(u32, mul_u32_u32(height, fb->pitches[color_plane]),
+			    fb->offsets[color_plane])) {
 		drm_dbg_kms(&i915->drm,
 			    "Bad offset 0x%08x or pitch %d for color plane %d\n",
 			    fb->offsets[color_plane], fb->pitches[color_plane],
@@ -1319,7 +1293,6 @@ static bool intel_plane_needs_remap(const struct intel_plane_state *plane_state)
 static int convert_plane_offset_to_xy(const struct intel_framebuffer *fb, int color_plane,
 				      int plane_width, int *x, int *y)
 {
-	struct drm_gem_object *obj = intel_fb_bo(&fb->base);
 	int ret;
 
 	ret = intel_fb_offset_to_xy(x, y, &fb->base, color_plane);
@@ -1343,7 +1316,8 @@ static int convert_plane_offset_to_xy(const struct intel_framebuffer *fb, int co
 	 * fb layout agrees with the fence layout. We already check that the
 	 * fb stride matches the fence stride elsewhere.
 	 */
-	if (color_plane == 0 && intel_bo_is_tiled(obj) &&
+#ifdef I915
+	if (color_plane == 0 && i915_gem_object_is_tiled(intel_fb_obj(&fb->base)) &&
 	    (*x + plane_width) * fb->base.format->cpp[color_plane] > fb->base.pitches[color_plane]) {
 		drm_dbg_kms(fb->base.dev,
 			    "bad fb plane %d offset: 0x%x\n",
@@ -1351,6 +1325,7 @@ static int convert_plane_offset_to_xy(const struct intel_framebuffer *fb, int co
 		return -EINVAL;
 	}
 
+#endif
 	return 0;
 }
 
@@ -1526,8 +1501,8 @@ static u32 calc_plane_remap_info(const struct intel_framebuffer *fb, int color_p
 		check_array_bounds(i915, view->gtt.remapped.plane, color_plane);
 
 		if (view->gtt.remapped.plane_alignment) {
-			u32 aligned_offset = ALIGN(gtt_offset,
-						   view->gtt.remapped.plane_alignment);
+			unsigned int aligned_offset = ALIGN(gtt_offset,
+							    view->gtt.remapped.plane_alignment);
 
 			size += aligned_offset - gtt_offset;
 			gtt_offset = aligned_offset;
@@ -1635,35 +1610,9 @@ bool intel_fb_supports_90_270_rotation(const struct intel_framebuffer *fb)
 	       fb->base.modifier == I915_FORMAT_MOD_Yf_TILED;
 }
 
-static unsigned int intel_fb_min_alignment(const struct drm_framebuffer *fb)
-{
-	struct drm_i915_private *i915 = to_i915(fb->dev);
-	struct intel_plane *plane;
-	unsigned int min_alignment = 0;
-
-	for_each_intel_plane(&i915->drm, plane) {
-		unsigned int plane_min_alignment;
-
-		if (!drm_plane_has_format(&plane->base, fb->format->format, fb->modifier))
-			continue;
-
-		plane_min_alignment = plane->min_alignment(plane, fb, 0);
-
-		drm_WARN_ON(&i915->drm, plane_min_alignment &&
-			    !is_power_of_2(plane_min_alignment));
-
-		if (intel_plane_needs_physical(plane))
-			continue;
-
-		min_alignment = max(min_alignment, plane_min_alignment);
-	}
-
-	return min_alignment;
-}
-
 int intel_fill_fb_info(struct drm_i915_private *i915, struct intel_framebuffer *fb)
 {
-	struct drm_gem_object *obj = intel_fb_bo(&fb->base);
+	struct drm_i915_gem_object *obj = intel_fb_obj(&fb->base);
 	u32 gtt_offset_rotated = 0;
 	u32 gtt_offset_remapped = 0;
 	unsigned int max_size = 0;
@@ -1736,14 +1685,12 @@ int intel_fill_fb_info(struct drm_i915_private *i915, struct intel_framebuffer *
 		max_size = max(max_size, offset + size);
 	}
 
-	if (mul_u32_u32(max_size, tile_size) > obj->size) {
+	if (mul_u32_u32(max_size, tile_size) > obj->ttm.base.size) {
 		drm_dbg_kms(&i915->drm,
 			    "fb too big for bo (need %llu bytes, have %zu bytes)\n",
-			    mul_u32_u32(max_size, tile_size), obj->size);
+			    mul_u32_u32(max_size, tile_size), obj->ttm.base.size);
 		return -EINVAL;
 	}
-
-	fb->min_alignment = intel_fb_min_alignment(&fb->base);
 
 	return 0;
 }
@@ -1841,16 +1788,16 @@ u32 intel_fb_max_stride(struct drm_i915_private *dev_priv,
 		return 128 * 1024;
 }
 
-static unsigned int
+static u32
 intel_fb_stride_alignment(const struct drm_framebuffer *fb, int color_plane)
 {
 	struct drm_i915_private *dev_priv = to_i915(fb->dev);
-	unsigned int tile_width;
+	u32 tile_width;
 
 	if (is_surface_linear(fb, color_plane)) {
-		unsigned int max_stride = intel_plane_fb_max_stride(dev_priv,
-								    fb->format->format,
-								    fb->modifier);
+		u32 max_stride = intel_plane_fb_max_stride(dev_priv,
+							   fb->format->format,
+							   fb->modifier);
 
 		/*
 		 * To make remapping with linear generally feasible
@@ -1910,10 +1857,9 @@ static int intel_plane_check_stride(const struct intel_plane_state *plane_state)
 				       fb->modifier, rotation);
 
 	if (stride > max_stride) {
-		drm_dbg_kms(plane->base.dev,
-			    "[FB:%d] stride (%d) exceeds [PLANE:%d:%s] max stride (%d)\n",
-			    fb->base.id, stride,
-			    plane->base.base.id, plane->base.name, max_stride);
+		DRM_DEBUG_KMS("[FB:%d] stride (%d) exceeds [PLANE:%d:%s] max stride (%d)\n",
+			      fb->base.id, stride,
+			      plane->base.base.id, plane->base.name, max_stride);
 		return -EINVAL;
 	}
 
@@ -1952,18 +1898,32 @@ int intel_plane_compute_gtt(struct intel_plane_state *plane_state)
 	return intel_plane_check_stride(plane_state);
 }
 
+static void intel_user_framebuffer_destroy_vm(struct drm_framebuffer *fb)
+{
+#ifdef I915
+	struct intel_framebuffer *intel_fb = to_intel_framebuffer(fb);
+	if (intel_fb_uses_dpt(fb))
+		intel_dpt_destroy(intel_fb->dpt_vm);
+#else
+	if (intel_fb_obj(fb)->flags & XE_BO_CREATE_PINNED_BIT) {
+		struct xe_bo *bo = intel_fb_obj(fb);
+
+		/* Unpin our kernel fb first */
+		xe_bo_lock(bo, false);
+		xe_bo_unpin(bo);
+		xe_bo_unlock(bo);
+        }
+#endif
+}
+
 static void intel_user_framebuffer_destroy(struct drm_framebuffer *fb)
 {
 	struct intel_framebuffer *intel_fb = to_intel_framebuffer(fb);
 
 	drm_framebuffer_cleanup(fb);
 
-	if (intel_fb_uses_dpt(fb))
-		intel_dpt_destroy(intel_fb->dpt_vm);
-
+	intel_user_framebuffer_destroy_vm(fb);
 	intel_frontbuffer_put(intel_fb->frontbuffer);
-
-	intel_fb_bo_framebuffer_fini(intel_fb_bo(fb));
 
 	kfree(intel_fb);
 }
@@ -1972,16 +1932,16 @@ static int intel_user_framebuffer_create_handle(struct drm_framebuffer *fb,
 						struct drm_file *file,
 						unsigned int *handle)
 {
-	struct drm_gem_object *obj = intel_fb_bo(fb);
-	struct intel_display *display = to_intel_display(obj->dev);
+	struct drm_i915_gem_object *obj = intel_fb_obj(fb);
 
-	if (intel_bo_is_userptr(obj)) {
-		drm_dbg(display->drm,
+#ifdef I915
+	if (i915_gem_object_is_userptr(obj)) {
+		drm_dbg(fb->dev,
 			"attempting to use a userptr for a framebuffer, denied\n");
 		return -EINVAL;
 	}
-
-	return drm_gem_handle_create(file, obj, handle);
+#endif
+	return drm_gem_handle_create(file, &obj->ttm.base, handle);
 }
 
 struct frontbuffer_fence_cb {
@@ -1999,13 +1959,14 @@ static void intel_user_framebuffer_fence_wake(struct dma_fence *dma,
 	dma_fence_put(dma);
 }
 
+#ifdef I915
 static int intel_user_framebuffer_dirty(struct drm_framebuffer *fb,
 					struct drm_file *file,
 					unsigned int flags, unsigned int color,
 					struct drm_clip_rect *clips,
 					unsigned int num_clips)
 {
-	struct drm_gem_object *obj = intel_fb_bo(fb);
+	struct drm_i915_gem_object *obj = intel_fb_obj(fb);
 	struct intel_frontbuffer *front = to_intel_frontbuffer(fb);
 	struct dma_fence *fence;
 	struct frontbuffer_fence_cb *cb;
@@ -2014,10 +1975,10 @@ static int intel_user_framebuffer_dirty(struct drm_framebuffer *fb,
 	if (!atomic_read(&front->bits))
 		return 0;
 
-	if (dma_resv_test_signaled(obj->resv, dma_resv_usage_rw(false)))
+	if (dma_resv_test_signaled(obj->base.resv, dma_resv_usage_rw(false)))
 		goto flush;
 
-	ret = dma_resv_get_singleton(obj->resv, dma_resv_usage_rw(false),
+	ret = dma_resv_get_singleton(obj->base.resv, dma_resv_usage_rw(false),
 				     &fence);
 	if (ret || !fence)
 		goto flush;
@@ -2044,47 +2005,110 @@ static int intel_user_framebuffer_dirty(struct drm_framebuffer *fb,
 	return ret;
 
 flush:
-	intel_bo_flush_if_display(obj);
+	i915_gem_object_flush_if_display(obj);
 	intel_frontbuffer_flush(front, ORIGIN_DIRTYFB);
 	return ret;
 }
-
+#endif
 static const struct drm_framebuffer_funcs intel_fb_funcs = {
 	.destroy = intel_user_framebuffer_destroy,
 	.create_handle = intel_user_framebuffer_create_handle,
+#ifdef I915
 	.dirty = intel_user_framebuffer_dirty,
+#else
+	.dirty = drm_atomic_helper_dirtyfb,
+#endif
+
 };
 
 int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
-			   struct drm_gem_object *obj,
+			   struct drm_i915_gem_object *obj,
 			   struct drm_mode_fb_cmd2 *mode_cmd)
 {
-	struct drm_i915_private *dev_priv = to_i915(obj->dev);
+	struct drm_i915_private *dev_priv = to_i915(obj->ttm.base.dev);
 	struct drm_framebuffer *fb = &intel_fb->base;
 	u32 max_stride;
 	int ret = -EINVAL;
 	int i;
+#ifdef I915
+	unsigned tiling, stride;
+#endif
 
-	ret = intel_fb_bo_framebuffer_init(intel_fb, obj, mode_cmd);
-	if (ret)
-		return ret;
 
 	intel_fb->frontbuffer = intel_frontbuffer_get(obj);
-	if (!intel_fb->frontbuffer) {
-		ret = -ENOMEM;
-		goto err;
+	if (!intel_fb->frontbuffer)
+		return -ENOMEM;
+
+#ifdef I915
+	i915_gem_object_lock(obj, NULL);
+	tiling = i915_gem_object_get_tiling(obj);
+	stride = i915_gem_object_get_stride(obj);
+	i915_gem_object_unlock(obj);
+
+	if (mode_cmd->flags & DRM_MODE_FB_MODIFIERS) {
+		/*
+		 * If there's a fence, enforce that
+		 * the fb modifier and tiling mode match.
+		 */
+		if (tiling != I915_TILING_NONE &&
+		    tiling != intel_fb_modifier_to_tiling(mode_cmd->modifier[0])) {
+			drm_dbg_kms(&dev_priv->drm,
+				    "tiling_mode doesn't match fb modifier\n");
+			goto err;
+		}
+	} else {
+		if (tiling == I915_TILING_X) {
+			mode_cmd->modifier[0] = I915_FORMAT_MOD_X_TILED;
+		} else if (tiling == I915_TILING_Y) {
+			drm_dbg_kms(&dev_priv->drm,
+				    "No Y tiling for legacy addfb\n");
+			goto err;
+		}
 	}
 
+#else
+	ret = ttm_bo_reserve(&obj->ttm, true, false, NULL);
+	if (ret)
+		goto err;
 	ret = -EINVAL;
+
+	if (!(obj->flags & XE_BO_SCANOUT_BIT)) {
+		/*
+		 * XE_BO_SCANOUT_BIT should ideally be set at creation, or is
+		 * automatically set when creating FB. We cannot change caching
+		 * mode when the object is VM_BINDed, so we can only set
+		 * coherency with display when unbound.
+		 */
+		if (XE_IOCTL_ERR(dev_priv, !list_empty((&obj->ttm.base.gpuva.list)))) {
+			ttm_bo_unreserve(&obj->ttm);
+			goto err;
+		}
+		obj->flags |= XE_BO_SCANOUT_BIT;
+	}
+	ttm_bo_unreserve(&obj->ttm);
+#endif
+
 	if (!drm_any_plane_has_format(&dev_priv->drm,
 				      mode_cmd->pixel_format,
 				      mode_cmd->modifier[0])) {
 		drm_dbg_kms(&dev_priv->drm,
 			    "unsupported pixel format %p4cc / modifier 0x%llx\n",
 			    &mode_cmd->pixel_format, mode_cmd->modifier[0]);
-		goto err_frontbuffer_put;
+		goto err;
 	}
+#ifdef I915
 
+	/*
+	 * gen2/3 display engine uses the fence if present,
+	 * so the tiling mode must match the fb modifier exactly.
+	 */
+	if (DISPLAY_VER(dev_priv) < 4 &&
+	    tiling != intel_fb_modifier_to_tiling(mode_cmd->modifier[0])) {
+		drm_dbg_kms(&dev_priv->drm,
+			    "tiling_mode must match fb modifier exactly on gen2/3\n");
+		goto err;
+	}
+#endif
 	max_stride = intel_fb_max_stride(dev_priv, mode_cmd->pixel_format,
 					 mode_cmd->modifier[0]);
 	if (mode_cmd->pitches[0] > max_stride) {
@@ -2093,26 +2117,37 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 			    mode_cmd->modifier[0] != DRM_FORMAT_MOD_LINEAR ?
 			    "tiled" : "linear",
 			    mode_cmd->pitches[0], max_stride);
-		goto err_frontbuffer_put;
+		goto err;
 	}
-
+#ifdef I915
+	/*
+	 * If there's a fence, enforce that
+	 * the fb pitch and fence stride match.
+	 */
+	if (tiling != I915_TILING_NONE && mode_cmd->pitches[0] != stride) {
+		drm_dbg_kms(&dev_priv->drm,
+			    "pitch (%d) must match tiling stride (%d)\n",
+			    mode_cmd->pitches[0], stride);
+		goto err;
+	}
+#endif
 	/* FIXME need to adjust LINOFF/TILEOFF accordingly. */
 	if (mode_cmd->offsets[0] != 0) {
 		drm_dbg_kms(&dev_priv->drm,
 			    "plane 0 offset (0x%08x) must be 0\n",
 			    mode_cmd->offsets[0]);
-		goto err_frontbuffer_put;
+		goto err;
 	}
 
 	drm_helper_mode_fill_fb_struct(&dev_priv->drm, fb, mode_cmd);
 
 	for (i = 0; i < fb->format->num_planes; i++) {
-		unsigned int stride_alignment;
+		u32 stride_alignment;
 
 		if (mode_cmd->handles[i] != mode_cmd->handles[0]) {
 			drm_dbg_kms(&dev_priv->drm, "bad plane %d handle\n",
 				    i);
-			goto err_frontbuffer_put;
+			goto err;
 		}
 
 		stride_alignment = intel_fb_stride_alignment(fb, i);
@@ -2120,28 +2155,28 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 			drm_dbg_kms(&dev_priv->drm,
 				    "plane %d pitch (%d) must be at least %u byte aligned\n",
 				    i, fb->pitches[i], stride_alignment);
-			goto err_frontbuffer_put;
+			goto err;
 		}
 
 		if (intel_fb_is_gen12_ccs_aux_plane(fb, i)) {
-			unsigned int ccs_aux_stride = gen12_ccs_aux_stride(intel_fb, i);
+			int ccs_aux_stride = gen12_ccs_aux_stride(intel_fb, i);
 
 			if (fb->pitches[i] != ccs_aux_stride) {
 				drm_dbg_kms(&dev_priv->drm,
 					    "ccs aux plane %d pitch (%d) must be %d\n",
 					    i,
 					    fb->pitches[i], ccs_aux_stride);
-				goto err_frontbuffer_put;
+				goto err;
 			}
 		}
 
-		fb->obj[i] = obj;
+		fb->obj[i] = &obj->ttm.base;
 	}
 
 	ret = intel_fill_fb_info(dev_priv, intel_fb);
 	if (ret)
-		goto err_frontbuffer_put;
-
+		goto err;
+#ifdef I915
 	if (intel_fb_uses_dpt(fb)) {
 		struct i915_address_space *vm;
 
@@ -2149,12 +2184,12 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 		if (IS_ERR(vm)) {
 			drm_dbg_kms(&dev_priv->drm, "failed to create DPT\n");
 			ret = PTR_ERR(vm);
-			goto err_frontbuffer_put;
+			goto err;
 		}
 
 		intel_fb->dpt_vm = vm;
 	}
-
+#endif
 	ret = drm_framebuffer_init(&dev_priv->drm, fb, &intel_fb_funcs);
 	if (ret) {
 		drm_err(&dev_priv->drm, "framebuffer init failed %d\n", ret);
@@ -2164,12 +2199,9 @@ int intel_framebuffer_init(struct intel_framebuffer *intel_fb,
 	return 0;
 
 err_free_dpt:
-	if (intel_fb_uses_dpt(fb))
-		intel_dpt_destroy(intel_fb->dpt_vm);
-err_frontbuffer_put:
-	intel_frontbuffer_put(intel_fb->frontbuffer);
+	intel_user_framebuffer_destroy_vm(fb);
 err:
-	intel_fb_bo_framebuffer_fini(obj);
+	intel_frontbuffer_put(intel_fb->frontbuffer);
 	return ret;
 }
 
@@ -2179,22 +2211,45 @@ intel_user_framebuffer_create(struct drm_device *dev,
 			      const struct drm_mode_fb_cmd2 *user_mode_cmd)
 {
 	struct drm_framebuffer *fb;
-	struct drm_gem_object *obj;
+	struct drm_i915_gem_object *obj;
 	struct drm_mode_fb_cmd2 mode_cmd = *user_mode_cmd;
 	struct drm_i915_private *i915 = to_i915(dev);
 
-	obj = intel_fb_bo_lookup_valid_bo(i915, filp, &mode_cmd);
-	if (IS_ERR(obj))
-		return ERR_CAST(obj);
+#ifdef I915
+	obj = i915_gem_object_lookup(filp, mode_cmd.handles[0]);
+	if (!obj)
+		return ERR_PTR(-ENOENT);
 
-	fb = intel_framebuffer_create_xe(obj, &mode_cmd);
-	drm_gem_object_put(obj);
+	/* object is backed with LMEM for discrete */
+	if (HAS_LMEM(i915) && !i915_gem_object_can_migrate(obj, INTEL_REGION_LMEM_0)) {
+		/* object is "remote", not in local memory */
+		i915_gem_object_put(obj);
+		drm_dbg_kms(&i915->drm, "framebuffer must reside in local memory\n");
+		return ERR_PTR(-EREMOTE);
+	}
+#else
+	struct drm_gem_object *gem = drm_gem_object_lookup(filp, mode_cmd.handles[0]);
+	if (!gem)
+		return ERR_PTR(-ENOENT);
+
+	obj = gem_to_xe_bo(gem);
+	/* Require vram placement or dma-buf import */
+	if (IS_DGFX(i915) &&
+	    !xe_bo_can_migrate(gem_to_xe_bo(gem), XE_PL_VRAM0) &&
+	    obj->ttm.type != ttm_bo_type_sg) {
+		drm_gem_object_put(gem);
+		return ERR_PTR(-EREMOTE);
+	}
+#endif
+
+	fb = intel_framebuffer_create(obj, &mode_cmd);
+	drm_gem_object_put(&obj->ttm.base);
 
 	return fb;
 }
 
 struct drm_framebuffer *
-intel_framebuffer_create_xe(struct drm_gem_object *obj,
+intel_framebuffer_create(struct drm_i915_gem_object *obj,
 			 struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	struct intel_framebuffer *intel_fb;
@@ -2213,9 +2268,4 @@ intel_framebuffer_create_xe(struct drm_gem_object *obj,
 err:
 	kfree(intel_fb);
 	return ERR_PTR(ret);
-}
-
-struct drm_gem_object *intel_fb_bo(const struct drm_framebuffer *fb)
-{
-	return fb ? fb->obj[0] : NULL;
 }

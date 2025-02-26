@@ -19,6 +19,7 @@ void intel_lpe_audio_irq_handler(struct drm_i915_private *dev_priv);
 void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
 			    enum transcoder cpu_transcoder, enum port port,
 			    const void *eld, int ls_clock, bool dp_output);
+
 #else
 static inline int intel_lpe_audio_init(struct drm_i915_private *dev_priv)
 {

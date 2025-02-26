@@ -31,5 +31,4 @@ static inline bool intel_sdvo_init(struct drm_i915_private *dev_priv,
 	return false;
 }
 #endif
-
 #endif /* __INTEL_SDVO_H__ */

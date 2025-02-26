@@ -10,6 +10,8 @@
 
 #include "intel_display_limits.h"
 
+struct drm_i915_private;
+
 struct intel_atomic_state;
 struct intel_crtc_state;
 
@@ -20,7 +22,7 @@ struct intel_link_bw_limits {
 	int max_bpp_x16[I915_MAX_PIPES];
 };
 
-void intel_link_bw_init_limits(struct intel_atomic_state *state,
+void intel_link_bw_init_limits(struct drm_i915_private *i915,
 			       struct intel_link_bw_limits *limits);
 int intel_link_bw_reduce_bpp(struct intel_atomic_state *state,
 			     struct intel_link_bw_limits *limits,

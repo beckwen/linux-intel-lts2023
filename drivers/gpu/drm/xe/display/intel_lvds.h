@@ -12,7 +12,6 @@
 
 enum pipe;
 struct drm_i915_private;
-
 #ifdef I915
 bool intel_lvds_port_enabled(struct drm_i915_private *dev_priv,
 			     i915_reg_t lvds_reg, enum pipe *pipe);
@@ -37,5 +36,4 @@ static inline bool intel_is_dual_link_lvds(struct drm_i915_private *dev_priv)
 	return false;
 }
 #endif
-
 #endif /* __INTEL_LVDS_H__ */
